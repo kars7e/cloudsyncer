@@ -8,17 +8,18 @@ import (
 
 type Worker struct {
 	operations        chan FileOperation
+	deltas            chan Delta
 	path              string
 	client            *Client
 	pendingOperations map[string]FileOperation
 }
 
-func NewWorker(operations chan FileOperation, client *Client, path string) *Worker {
+func NewWorker(operations chan FileOperation, deltas chan Delta, client *Client, path string) *Worker {
 	w := Worker{operations: operations, path: path, client: client, pendingOperations: make(map[string]FileOperation)}
 	return &w
 }
 
-func (w *Worker) AddPendingOperation(path string, op FileOperation) {
+func (w *Worker) SetPendingOperation(path string, op FileOperation) {
 	w.pendingOperations[path] = op
 }
 
@@ -60,7 +61,20 @@ func (w *Worker) Sync(cursor string) error {
 	if delta.Entries != nil {
 		for _, entry := range delta.Entries {
 			for key, metadata := range entry {
-				logger.Debugf("%s : %s", key, metadata.Name)
+				logger.Debugf("%s : %s", key, metadata == nil)
+				op := NewFileOperation()
+				op.Direction = Incoming
+				op.Path = key
+				op.Attributes.Path = key
+				if metadata == nil {
+					op.Attributes.IsRemoved = true
+					op.Attributes.Modified = time.Now()
+					op.Type = Delete
+				} else {
+					op.Attributes = *metadata
+					op.Type = Create
+				}
+				w.operations <- op
 			}
 		}
 	}

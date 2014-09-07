@@ -18,34 +18,12 @@ import (
 type Delta struct {
 	Reset   bool
 	Entries []map[string]*db.Metadata
-	Cursor  int64
+	Cursor  string
 }
 
 type Token struct {
 	AuthencityToken string `json:"authencity_token"`
 }
-
-type FileOperation struct {
-	Path       string
-	Direction  OpDirection
-	Type       OpType
-	Attributes db.Metadata
-}
-
-type OpDirection int
-type OpType int
-
-const (
-	Create OpType = iota + 1
-	Delete
-	Move
-	Modify
-	ChangeAttrib
-)
-const (
-	Incoming OpDirection = iota + 1
-	Outgoing
-)
 
 var appConfig = make(map[string]string)
 
@@ -209,8 +187,9 @@ func main() {
 		db.SetCfgValue("work_dir", appConfig["work_dir"])
 	}
 	operations := make(chan FileOperation, 100)
+	deltas := make(chan Delta, 100)
 	client := NewClient(operations, appConfig["work_dir"])
-	worker := NewWorker(operations, client, appConfig["work_dir"])
+	worker := NewWorker(operations, deltas, client, appConfig["work_dir"])
 	watcher := NewWatcher(appConfig["work_dir"], operations, worker)
 
 	err = initialConfig(client)
@@ -225,12 +204,9 @@ func main() {
 		log.Print("Error starting watcher: ", err)
 	}
 	watcher.Watch(wg)
-	log.Printf("Cloudsyncer started.")
-	log.Printf("Checking for local state...")
 	appConfig["cursor"] = db.GetCfgValue("cursor")
-	err = worker.Sync(appConfig["cursor"])
-	if err != nil {
-		log.Print(err)
-	}
+	listener := NewListener(deltas, client)
+	listener.Listen(appConfig["cursor"])
+	log.Printf("Cloudsyncer started.")
 	wg.Wait()
 }

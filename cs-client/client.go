@@ -101,9 +101,6 @@ func (c *Client) Login(username string, password string, computername string) (a
 	return
 }
 
-func (c *Client) Poll() {
-}
-
 func (c *Client) setAuth(header http.Header) {
 	log.Printf("setting username: '%s' and token '%s'", c.username, c.authToken)
 	header.Set("X-Cloudsyncer-Authtoken", c.authToken)
@@ -213,6 +210,32 @@ func (c *Client) Remove(path string) error {
 		return nil
 	}
 	return errors.New("received wrong status: " + resp.Status)
+}
+
+func (c *Client) Poll(cursor string) (changes bool, err error) {
+	serverUrl := c.hostname + "/longpoll_delta"
+	data := url.Values{}
+	data.Set("cursor", cursor)
+	serverUrl += "?" + data.Encode()
+	req, err := http.NewRequest("GET", serverUrl, nil)
+	if err != nil {
+		return false, err
+	}
+	c.setAuth(req.Header)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode == 200 {
+		jsonResponse := make(map[string]bool)
+		rawJson, _ := ioutil.ReadAll(resp.Body)
+		err = json.Unmarshal(rawJson, &jsonResponse)
+		if err != nil {
+			return false, err
+		}
+		return jsonResponse["changes"], nil
+	}
+	return false, errors.New("received wrong status: " + resp.Status)
 }
 
 func (c *Client) GetDelta(cursor string) (*Delta, error) {

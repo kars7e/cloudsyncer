@@ -70,3 +70,8 @@ func GetFileByPath(path string) (file *File, err error) {
 	}
 	return file, nil
 }
+
+func GetCurrentCursor() (cursor int64, err error) {
+	cursor, err = dbAccess.SelectInt("select MAX(current_revision) from files where synced = ? ", true)
+	return
+}

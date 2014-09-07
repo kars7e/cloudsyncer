@@ -75,14 +75,22 @@ func (w *Watcher) Watch(wg *sync.WaitGroup) {
 						metadata.Modified = time.Now()
 						metadata.Name = path.Base(ev.Name)
 					}
-					op := FileOperation{Path: ev.Name, Direction: Outgoing, Type: Create, Attributes: metadata}
+					op := NewFileOperation()
+					op.Path = ev.Name
+					op.Direction = Outgoing
+					op.Type = Create
+					op.Attributes = metadata
 					w.operations <- op
 				case ev.Op&fsnotify.Remove == fsnotify.Remove || ev.Op&fsnotify.Rename == fsnotify.Rename:
 					var metadata db.Metadata
 					metadata.IsRemoved = true
 					metadata.Name = path.Base(ev.Name)
 					metadata.Modified = time.Now()
-					op := FileOperation{Path: ev.Name, Direction: Outgoing, Type: Delete, Attributes: metadata}
+					op := NewFileOperation()
+					op.Path = ev.Name
+					op.Direction = Outgoing
+					op.Type = Delete
+					op.Attributes = metadata
 					w.operations <- op
 				case ev.Op&fsnotify.Write == fsnotify.Write && ev.Op&fsnotify.Remove != fsnotify.Remove:
 					metadata, err := getMetaForLocalFile(ev.Name)
@@ -92,7 +100,11 @@ func (w *Watcher) Watch(wg *sync.WaitGroup) {
 						metadata.Modified = time.Now()
 						metadata.Name = path.Base(ev.Name)
 					}
-					op := FileOperation{Path: ev.Name, Direction: Outgoing, Type: Modify, Attributes: metadata}
+					op := NewFileOperation()
+					op.Path = ev.Name
+					op.Direction = Outgoing
+					op.Type = Modify
+					op.Attributes = metadata
 					w.operations <- op
 				case ev.Op&fsnotify.Chmod == fsnotify.Chmod:
 
@@ -103,7 +115,12 @@ func (w *Watcher) Watch(wg *sync.WaitGroup) {
 						metadata.Modified = time.Now()
 						metadata.Name = path.Base(ev.Name)
 					}
-					op := FileOperation{Path: ev.Name, Direction: Outgoing, Type: ChangeAttrib, Attributes: metadata}
+
+					op := NewFileOperation()
+					op.Path = ev.Name
+					op.Direction = Outgoing
+					op.Type = ChangeAttrib
+					op.Attributes = metadata
 					w.operations <- op
 				}
 			case err, ok := <-w.watcher.Errors:
@@ -148,7 +165,7 @@ func (w *Watcher) returnWalker() filepath.WalkFunc {
 		if path != appConfig["work_dir"] {
 
 			relativePath := strings.Replace(path, appConfig["work_dir"], "", 1)
-			dbFile, err := db.GetFileByPath(relativePath)
+			dbFile, err := db.GetFileByPath(toolkit.NormalizePath(relativePath))
 			if err != nil {
 				logger.Debug("Error getting file from database ", err)
 				return err
@@ -158,12 +175,19 @@ func (w *Watcher) returnWalker() filepath.WalkFunc {
 				log.Printf("Error getting metadata for %s")
 				return err
 			}
+			op := NewFileOperation()
+			op.Direction = Outgoing
+			op.Path = toolkit.NormalizePath(relativePath)
+			op.Attributes = metadata
 			if dbFile == nil {
+				op.Type = Create
+				w.worker.SetPendingOperation(toolkit.NormalizePath(relativePath), op)
 				log.Printf("New file/folder %s. Adding to local state", path)
-				w.operations <- FileOperation{Type: Create, Direction: Outgoing, Path: path, Attributes: metadata}
 
 			} else if dbFile.ModificationTime.Unix() < info.ModTime().Unix() {
-				w.operations <- FileOperation{Type: ChangeAttrib, Direction: Outgoing, Path: path, Attributes: metadata}
+				op.Type = ChangeAttrib
+				op.Attributes.Rev = dbFile.CurrentRevision
+				w.worker.SetPendingOperation(toolkit.NormalizePath(relativePath), op)
 			}
 		}
 
