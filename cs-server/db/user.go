@@ -5,8 +5,6 @@ import (
 	"errors"
 	"path"
 	"time"
-
-	"github.com/coopernurse/gorp"
 )
 
 type User struct {
@@ -83,13 +81,13 @@ func (user *User) GetCurrentState() ([]map[string]interface{}, error) {
 
 func (user *User) GetChangesFromCursor(cursor int64) ([]map[string]interface{}, int64, error) {
 	var children []Metadata
-	newCursor, err := dbAccess.SelectInt("select max(cursor_new) from changes where user_id = ?", user.Id)
+	newCursor, err := dbAccess.SelectInt("select max(id) from revisions where user_id = ?", user.Id)
 	if err != nil {
 		return nil, 0, err
 	}
 	if _, err := dbAccess.Select(children, `select files.path Path, revisions.name Name, files.is_dir IsDir, revisions.size Size, revisions.id Rev, revisions.modified Modified, files.is_removed IsRemoved
-	                                     from files join revisions on files.current_revision_id = revisions.id join changes on files.id = changes.file_id
-																			 where files.user_id = ? and cursor_old <= ?`, user.Id, cursor); err != nil {
+	                                     from files join revisions on files.current_revision_id = revisions.id 
+																			 where files.user_id = ? and revisions.id > ?`, user.Id, cursor); err != nil {
 		return nil, 0, err
 	}
 	resp := make([]map[string]interface{}, 0)
@@ -180,6 +178,7 @@ func (user *User) CreateFile(filepath string, isDir bool, overwrite bool, uuid s
 	revision.Uuid = uuid
 	revision.FileId = file.Id
 	revision.Name = path.Base(filepath)
+	revision.UserId = user.Id
 	err = tx.Insert(revision)
 	if err != nil {
 		tx.Rollback()
@@ -191,10 +190,10 @@ func (user *User) CreateFile(filepath string, isDir bool, overwrite bool, uuid s
 		tx.Rollback()
 		return nil, err
 	}
-	err = user.AddChange(tx, file)
-	if err != nil {
-		return nil, err
-	}
+	// err = user.AddChange(tx, file)
+	// if err != nil {
+	// 	return nil, err
+	// }
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -221,28 +220,30 @@ func (user *User) Remove(filepath string) (file *File, err error) {
 	return file, nil
 
 }
-func (user *User) AddChange(tx *gorp.Transaction, file *File) error {
-	var newCursor int64 = 0
-	count, err := tx.SelectInt("select count(*) from changes where user_id = ?", user.Id)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if count > 0 {
-		newCursor, err = tx.SelectInt("select max(cursor_new) from changes where user_id = ?", user.Id)
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
-	change := Change{FileId: file.Id, UserId: user.Id, CursorOld: newCursor, CursorNew: newCursor + 1}
-	err = tx.Insert(&change)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	return nil
-}
+
+// func (user *User) AddChange(tx *gorp.Transaction, file *File) error {
+// 	var newCursor int64 = 0
+// 	count, err := tx.SelectInt("select count(*) from changes where user_id = ?", user.Id)
+// 	if err != nil {
+// 		tx.Rollback()
+// 		return err
+// 	}
+// 	if count > 0 {
+// 		newCursor, err = tx.SelectInt("select max(cursor_new) from changes where user_id = ?", user.Id)
+// 		if err != nil {
+// 			tx.Rollback()
+// 			return err
+// 		}
+// 	}
+// 	change := Change{FileId: file.Id, UserId: user.Id, CursorOld: newCursor, CursorNew: newCursor + 1}
+// 	err = tx.Insert(&change)
+// 	if err != nil {
+// 		tx.Rollback()
+// 		return err
+// 	}
+// 	return nil
+// }
+
 func (user *User) GetRevision(file *File, rev int64) (revision *Revision, err error) {
 	revision = new(Revision)
 	if err := dbAccess.SelectOne(revision, "select * from revisions where id=? and user_id = ? and file_id=?", rev, user.Id, file.Id); err != nil {

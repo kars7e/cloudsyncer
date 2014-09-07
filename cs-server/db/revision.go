@@ -16,6 +16,7 @@ type Revision struct {
 	FileId   int64     `db:"file_id"`
 	IsDir    bool      `db:"is_dir"`
 	Name     string    `db:"name"`
+	UserId   int64     `db:"user_id"`
 }
 
 func (r *Revision) PreInsert(s gorp.SqlExecutor) error {

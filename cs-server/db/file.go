@@ -80,35 +80,35 @@ func (file *File) Remove(tx *gorp.Transaction) (err error) {
 		tx.Rollback()
 		return err
 	}
-	err = file.AddChange(tx)
-	if err != nil {
-		return err
-	}
+	// err = file.AddChange(tx)
+	// if err != nil {
+	// 	return err
+	// }
 	return nil
 }
 
-func (file *File) AddChange(tx *gorp.Transaction) error {
-	var newCursor int64 = 0
-	count, err := tx.SelectInt("select count(*) from changes where user_id = ?", file.UserId)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if count > 0 {
-		newCursor, err = tx.SelectInt("select max(cursor_new) from changes where user_id = ?", file.UserId)
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
-	change := Change{FileId: file.Id, UserId: file.UserId, CursorOld: newCursor, CursorNew: newCursor + 1}
-	err = tx.Insert(&change)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	return nil
-}
+// func (file *File) AddChange(tx *gorp.Transaction) error {
+// 	var newCursor int64 = 0
+// 	count, err := tx.SelectInt("select count(*) from changes where user_id = ?", file.UserId)
+// 	if err != nil {
+// 		tx.Rollback()
+// 		return err
+// 	}
+// 	if count > 0 {
+// 		newCursor, err = tx.SelectInt("select max(cursor_new) from changes where user_id = ?", file.UserId)
+// 		if err != nil {
+// 			tx.Rollback()
+// 			return err
+// 		}
+// 	}
+// 	change := Change{FileId: file.Id, UserId: file.UserId, CursorOld: newCursor, CursorNew: newCursor + 1}
+// 	err = tx.Insert(&change)
+// 	if err != nil {
+// 		tx.Rollback()
+// 		return err
+// 	}
+// 	return nil
+// }
 func (file *File) GetChildren() (children []File, err error) {
 	count, err := dbAccess.SelectInt("select count(*) "+
 		"from files "+
