@@ -418,30 +418,35 @@ func longpoll_delta(w http.ResponseWriter, r *http.Request) {
 		handleErr(w, 400, err, "Failed to parse form")
 		return
 	}
-	params := r.Form
 	session := context.Get(r, "session").(*db.Session)
 	user := context.Get(r, "user").(*db.User)
-	if params["cursor"] == nil || params["cursor"][0] == "" {
+	if r.FormValue("cursor") == "" {
 		handleErr(w, 400, nil, "Missing required parameter cursor")
 		return
 	}
 	changes := false
-	newChangeArrived[user][session] = make(chan int)
-
-	defer delete(newChangeArrived[user], session)
-	defer close(newChangeArrived[user][session])
-	timer := time.NewTimer(time.Second * 30)
-	<-timer.C
-
-	select {
-	case _ = <-newChangeArrived[user][session]:
-		timer.Stop()
+	cursor, _ := strconv.ParseInt(r.FormValue("cursor"), 10, 0)
+	changeSet, _, err := user.GetChangesFromCursor(cursor)
+	if len(changeSet) > 0 {
 		changes = true
-		break
-	case _ = <-timer.C:
-		break
+	} else {
+		newChangeArrived[user][session] = make(chan int)
+
+		defer delete(newChangeArrived[user], session)
+		defer close(newChangeArrived[user][session])
+		timer := time.NewTimer(time.Second * 30)
+		<-timer.C
+
+		select {
+		case _ = <-newChangeArrived[user][session]:
+			timer.Stop()
+			changes = true
+			break
+		case _ = <-timer.C:
+			break
+		}
+		delete(newChangeArrived[user], session)
 	}
-	delete(newChangeArrived[user], session)
 	respJSON, err := json.Marshal(map[string]bool{"changes": changes})
 	if err != nil {
 		handleErr(w, 500, err, "Error marshaling json")
