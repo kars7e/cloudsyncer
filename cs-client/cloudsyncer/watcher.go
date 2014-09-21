@@ -1,8 +1,13 @@
-package main
+package cloudsyncer
 
 import (
+	"bufio"
 	"cloudsyncer/cs-client/db"
 	"cloudsyncer/toolkit"
+	"crypto/sha1"
+	"errors"
+	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -15,6 +20,8 @@ import (
 	"gopkg.in/fsnotify.v1"
 )
 
+// Watcher is responsible for notifing worker when local file system has been changed.
+// It uses fsnotify to grab file system notifications and push them to operations channel.
 type Watcher struct {
 	operations      chan FileOperation
 	excludedFolders []string
@@ -23,6 +30,7 @@ type Watcher struct {
 	worker          *Worker
 }
 
+// Creates and returns new watcher instance
 func NewWatcher(path string, operations chan FileOperation, worker *Worker) *Watcher {
 	w := Watcher{operations: operations, path: path}
 	w.worker = worker
@@ -35,10 +43,18 @@ func NewWatcher(path string, operations chan FileOperation, worker *Worker) *Wat
 	return &w
 }
 
+// Sets excluded folders which are not synced
+func (w *Watcher) SetExcludedFolders(folders []string) {
+	w.excludedFolders = folders
+}
+
+// Add folder to excluded folders slice.
 func (w *Watcher) AddExcludedFolder(path string) {
 	w.excludedFolders = append(w.excludedFolders, path)
 }
 
+// Initalize watcher by creating a walker, which walks through directories in work dir and adds them to watcher.
+// Also searches for new files (not existing in state)
 func (w *Watcher) Init() (err error) {
 	log.Printf("Adding main folder %s to watcher", w.path)
 	if err = w.watcher.Add(w.path); err != nil {
@@ -49,6 +65,7 @@ func (w *Watcher) Init() (err error) {
 	return
 }
 
+// creates a goroutine witch listens for new file system notification. When new notification arrives it's being sent to the operations channel.
 func (w *Watcher) Watch(wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
@@ -63,6 +80,8 @@ func (w *Watcher) Watch(wg *sync.WaitGroup) {
 				}
 				switch {
 				case ev.Name == "":
+					break
+				case ev.Name == getTmpDir():
 					break
 				case ev.Op&fsnotify.Create == fsnotify.Create:
 					if toolkit.IsDirectory(ev.Name) {
@@ -82,6 +101,13 @@ func (w *Watcher) Watch(wg *sync.WaitGroup) {
 					op.Attributes = metadata
 					w.operations <- op
 				case ev.Op&fsnotify.Remove == fsnotify.Remove || ev.Op&fsnotify.Rename == fsnotify.Rename:
+					log.Printf("Checking if have discard for %s", ev.Name)
+					if _, ok := discard[ev.Name]; ok {
+						log.Printf("Discarding Remove for %s", ev.Name)
+						delete(discard, ev.Name)
+						break
+					}
+					log.Printf("We don't have discard for %s", ev.Name)
 					var metadata db.Metadata
 					metadata.IsRemoved = true
 					metadata.Name = path.Base(ev.Name)
@@ -107,21 +133,23 @@ func (w *Watcher) Watch(wg *sync.WaitGroup) {
 					op.Attributes = metadata
 					w.operations <- op
 				case ev.Op&fsnotify.Chmod == fsnotify.Chmod:
+					break
+					/*
+						metadata, err := getMetaForLocalFile(ev.Name)
+						if err != nil {
+							log.Printf("Received error when reading metadata for file %s. Error: %s", ev.Name, err)
+							metadata.IsRemoved = true
+							metadata.Modified = time.Now()
+							metadata.Name = path.Base(ev.Name)
+						}
 
-					metadata, err := getMetaForLocalFile(ev.Name)
-					if err != nil {
-						log.Printf("Received error when reading metadata for file %s. Error: %s", ev.Name, err)
-						metadata.IsRemoved = true
-						metadata.Modified = time.Now()
-						metadata.Name = path.Base(ev.Name)
-					}
-
-					op := NewFileOperation()
-					op.Path = ev.Name
-					op.Direction = Outgoing
-					op.Type = ChangeAttrib
-					op.Attributes = metadata
-					w.operations <- op
+						op := NewFileOperation()
+						op.Path = ev.Name
+						op.Direction = Outgoing
+						op.Type = ChangeAttrib
+						op.Attributes = metadata
+						w.operations <- op
+					*/
 				}
 			case err, ok := <-w.watcher.Errors:
 				if err != nil {
@@ -158,6 +186,13 @@ func (w *Watcher) returnWalker() filepath.WalkFunc {
 			return err
 		}
 		if info.IsDir() {
+			for _, folder := range w.excludedFolders {
+
+				if strings.Contains(path, folder) {
+					log.Printf("Excluded folders for %s", path)
+					return filepath.SkipDir
+				}
+			}
 			log.Printf("Adding %s to watcher", path)
 			w.watcher.Add(path)
 
@@ -177,17 +212,38 @@ func (w *Watcher) returnWalker() filepath.WalkFunc {
 			}
 			op := NewFileOperation()
 			op.Direction = Outgoing
-			op.Path = toolkit.NormalizePath(relativePath)
+			op.Path = path
 			op.Attributes = metadata
+			op.Type = Create
 			if dbFile == nil {
-				op.Type = Create
-				w.worker.SetPendingOperation(toolkit.NormalizePath(relativePath), op)
+				w.operations <- op
 				log.Printf("New file/folder %s. Adding to local state", path)
 
 			} else if dbFile.ModificationTime.Unix() < info.ModTime().Unix() {
-				op.Type = ChangeAttrib
+				if dbFile.Size == info.Size() {
+
+					file, err := os.Open(path)
+					if err != nil {
+						return errors.New("Error: unable to open the file: " + err.Error())
+					}
+					defer file.Close()
+					reader := bufio.NewReader(file)
+					sha1 := sha1.New()
+					_, err = io.Copy(sha1, reader)
+					if err != nil {
+						return errors.New("Error: unable to copy the file: " + err.Error())
+					}
+					localHash := fmt.Sprintf("%x", sha1.Sum(nil))
+					if localHash == dbFile.Hash {
+						dbFile.UpdateModificationTime(info.ModTime())
+						dbFile.Sync()
+						return nil
+					}
+				}
+
 				op.Attributes.Rev = dbFile.CurrentRevision
-				w.worker.SetPendingOperation(toolkit.NormalizePath(relativePath), op)
+
+				w.operations <- op
 			}
 		}
 

@@ -1,7 +1,8 @@
-package main
+package cloudsyncer
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -15,17 +16,20 @@ import (
 	"github.com/howeyc/gopass"
 )
 
+// struct Delta holds information retrieved from delta remote call.
 type Delta struct {
 	Reset   bool
 	Entries []map[string]*db.Metadata
 	Cursor  string
 }
 
+// authencity token retrieved from server during login remote call.
 type Token struct {
 	AuthencityToken string `json:"authencity_token"`
 }
 
 var appConfig = make(map[string]string)
+var discard = make(map[string]bool)
 
 func register(client *Client) (username string, password string, computername string, err error) {
 	fmt.Println("Please provide your user data")
@@ -72,9 +76,6 @@ func initialConfig(client *Client) error {
 	appConfig["username"] = db.GetCfgValue("username")
 	appConfig["authencity_token"] = db.GetCfgValue("authencity_token")
 	appConfig["computer_name"] = db.GetCfgValue("computer_name")
-	for key, value := range appConfig {
-		log.Printf("key: %s, value: %s", key, value)
-	}
 	if appConfig["username"] == "" || appConfig["authencity_token"] == "" || appConfig["computer_name"] == "" {
 		username, authencity_token, computer_name, err := loginOrRegister(client)
 		if err != nil {
@@ -156,16 +157,23 @@ func warningClearDataFolder(dataFolder string) {
 	fmt.Printf("There was an unrecovarable error during application startup. Please manually remove the application folder %s", dataFolder)
 }
 
-func main() {
+var confPath string = ""
+
+func Start() {
 	log.Println("Starting cloudsyncer client.")
+	confPath = *flag.String("cfgdir", "", "a string")
+	if !toolkit.IsDirectory(confPath) {
+		confPath = ""
+	}
+	log.Printf("Config path set to %s", confPath)
 	log.Printf("Opening database file %s", getDbFilePath())
-	log.Printf("%d %d %d %d %d", Create, Delete, Move, Modify, ChangeAttrib)
 	if !toolkit.Exists(getDbFilePath()) {
 		log.Println("Configuration database does not exist. Need to create one.")
 		if prepareDatabase() != nil {
 			log.Fatal("Oops, something went wrong. Exiting!")
 		}
 	}
+	// _ := *flag.Bool("reset", false, "removes all data from files table, sets cursor to 0")
 	if toolkit.IsDirectory(getDbFilePath()) {
 		log.Println("Error - database path should be a file, is a directory")
 		warningClearDataFolder(getConfigFileDir())
@@ -188,25 +196,46 @@ func main() {
 	}
 	operations := make(chan FileOperation, 100)
 	deltas := make(chan Delta, 100)
-	client := NewClient(operations, appConfig["work_dir"])
-	worker := NewWorker(operations, deltas, client, appConfig["work_dir"])
+	client := NewClient(appConfig["work_dir"])
+	listener := NewListener(deltas, client)
+	worker := NewWorker(operations, deltas, client, listener, appConfig["work_dir"])
 	watcher := NewWatcher(appConfig["work_dir"], operations, worker)
 
 	err = initialConfig(client)
 	if err != nil {
 		log.Println("Something went wrong, ", err)
+		os.Exit(1)
 	}
 	client.SetCredentials(appConfig["authencity_token"], appConfig["username"])
+	os.MkdirAll(getTmpDir(), 0777)
+	if err = worker.InitDb(); err != nil {
+		log.Printf("worker error initializing database: %s", err)
+		os.Exit(1)
+	}
 	wg := new(sync.WaitGroup)
 	worker.Work()
-	err = watcher.Init()
+	watcher.AddExcludedFolder(getTmpDir())
+	if err = watcher.Init(); err != nil {
+		log.Printf("Error initializing watcher: %s", err)
+		os.Exit(1)
+	}
+	if err = worker.Sync(); err != nil {
+		log.Printf("Worker error during syncing: %s", err)
+		os.Exit(1)
+	}
 	if err != nil {
 		log.Print("Error starting watcher: ", err)
 	}
 	watcher.Watch(wg)
-	appConfig["cursor"] = db.GetCfgValue("cursor")
-	listener := NewListener(deltas, client)
-	listener.Listen(appConfig["cursor"])
+	cursor := db.GetCfgValue("cursor")
+	if cursor == "" {
+		cursor = "0"
+	}
+	if err != nil {
+		log.Fatal("failed to get cursor ", err)
+	}
+	listener.Listen(cursor)
 	log.Printf("Cloudsyncer started.")
 	wg.Wait()
+	log.Printf("Quitting cloudsyncer... have a nice day!")
 }

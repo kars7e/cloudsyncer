@@ -1,3 +1,4 @@
+// This package is responsible for storing and retreiving local state of files
 package db
 
 import (
@@ -28,6 +29,8 @@ var (
 	ErrNotExist            = errors.New("file does not exist")
 )
 
+// Initalization function. Sets database access and logger, creates tables if missing.
+// Returns error if error has occured.
 func InitDb(dbpath string, _logger *logrus.Logger) (err error) {
 	if dbAccess != nil {
 		return nil
@@ -40,7 +43,7 @@ func InitDb(dbpath string, _logger *logrus.Logger) (err error) {
 	}
 
 	dbAccess = &gorp.DbMap{Db: db, Dialect: gorp.SqliteDialect{}}
-	dbAccess.TraceOn("[gorp]", &gorpLogger{logger: logger})
+	//dbAccess.TraceOn("[gorp]", &gorpLogger{logger: logger})
 	dbAccess.AddTableWithName(File{}, "files").SetKeys(true, "Id")
 	dbAccess.AddTableWithName(Config{}, "config").SetKeys(true, "Id")
 	if err = dbAccess.CreateTablesIfNotExists(); err != nil {
@@ -50,10 +53,63 @@ func InitDb(dbpath string, _logger *logrus.Logger) (err error) {
 	return nil
 }
 
+// Closes connection to database.
 func Close() {
 	dbAccess.Db.Close()
 }
 
+// Resets database state by removing all records in files table. Use with caution.
+// Returns error if error has occured.
+func Reset() error {
+	_, err := dbAccess.Exec("delete from files")
+	return err
+}
+
+// Returns slice of File structs with synced attribute set to false, which means those files were not downloaded successfully.
+// Returns double nil if no such files were found.
+// Returns nil and error if error has occured.
+func GetUnsyncedFiles() ([]File, error) {
+
+	count, err := dbAccess.SelectInt("select count(*) from files where synced = ?", false)
+	if err != nil {
+		logger.Error(err)
+		return nil, err
+	}
+	if count < 1 {
+		return nil, nil
+	}
+	files := make([]File, 0)
+	_, err = dbAccess.Select(&files, "select * from files where synced = ?", false)
+	if err != nil {
+		logger.Error(err)
+		return nil, err
+	}
+	return files, nil
+
+}
+
+// Returns slice of File structs of not uploaded files, that means files without current_revision.
+func GetNotUploadedFiles() ([]File, error) {
+
+	count, err := dbAccess.SelectInt("select count(*) from files where current_revision = ?", 0)
+	if err != nil {
+		logger.Error(err)
+		return nil, err
+	}
+	if count < 1 {
+		return nil, nil
+	}
+	files := make([]File, 0)
+	_, err = dbAccess.Select(&files, "select * from files where current_revision = ?", 0)
+	if err != nil {
+		logger.Error(err)
+		return nil, err
+	}
+	return files, nil
+
+}
+
+// Returns pointer to file with given path, if such file exists.
 func GetFileByPath(path string) (file *File, err error) {
 	file = new(File)
 	count, err := dbAccess.SelectInt("select count(*) from files where path = ?", path)
@@ -69,9 +125,4 @@ func GetFileByPath(path string) (file *File, err error) {
 		return nil, err
 	}
 	return file, nil
-}
-
-func GetCurrentCursor() (cursor int64, err error) {
-	cursor, err = dbAccess.SelectInt("select MAX(current_revision) from files where synced = ? ", true)
-	return
 }
