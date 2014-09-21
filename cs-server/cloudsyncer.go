@@ -3,14 +3,14 @@ package main
 import (
 	"cloudsyncer/cs-server/config"
 	"cloudsyncer/cs-server/db"
-	"cloudsyncer/cs-server/protocols/http"
+	"cloudsyncer/cs-server/server"
 	"os"
 )
 
 func main() {
 	db.InitDb(config.DB_PATH, logger)
-	http.SetLogger(logger)
-	var err = http.RunInterface("", 9999)
+	server.SetLogger(logger)
+	var err = server.Serve("", 9999)
 	if err != nil {
 		os.Exit(1)
 	} else {

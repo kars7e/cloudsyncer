@@ -7,6 +7,7 @@ import (
 	"time"
 )
 
+// Struct describing single user.
 type User struct {
 	Id       int64  `db:"id"`
 	Username string `db:"username"`
@@ -14,6 +15,7 @@ type User struct {
 	Password string `db:"password"`
 }
 
+// Returns true if provided password matches record in database.
 func (user *User) CheckPassword(password string) bool {
 	if toolkit.GetSha1([]byte(user.Salt+password)) == user.Password {
 		return true
@@ -21,6 +23,7 @@ func (user *User) CheckPassword(password string) bool {
 	return false
 }
 
+// If User with provided username exists in database, returns pointer to user struct. Returns nil otherwise.
 func GetUser(username string) *User {
 	var user User
 	if err := dbAccess.SelectOne(&user, "select * from users where username=?", username); err != nil {
@@ -34,6 +37,8 @@ func GetUser(username string) *User {
 
 }
 
+// Creates user with given username and password. returns created user struct.
+// If there was an error when creating user, returns nil and error (for example: User already exists).
 func CreateUser(username string, password string) (*User, error) {
 	if user := GetUser(username); user != nil {
 		return nil, ErrEntityAlreadyExists
@@ -47,6 +52,11 @@ func CreateUser(username string, password string) (*User, error) {
 	}
 	return GetUser(username), nil
 }
+
+// Returns all children for given path as a slice of type Metadata.
+// Returns double nil if there was no error but no children exist.
+// Returns nil and error if error occured.
+// This method is defined as *User method to return only user files.
 func (user *User) GetChildren(path string) (children []Metadata, err error) {
 	count, err := dbAccess.SelectInt(`select count(*) 
 	                                     from files join revisions on files.current_revision_id = revisions.id
@@ -58,7 +68,7 @@ func (user *User) GetChildren(path string) (children []Metadata, err error) {
 	if count < 1 {
 		return nil, nil
 	}
-	if _, err := dbAccess.Select(&children, `select revisions.name Name, files.path Path, files.is_dir IsDir, revisions.size Size, revisions.id Rev, revisions.modified Modified
+	if _, err := dbAccess.Select(&children, `select revisions.hash Hash, revisions.name Name, files.path Path, files.is_dir IsDir, revisions.size Size, revisions.id Rev, revisions.modified Modified
 	                                     from files join revisions on files.current_revision_id = revisions.id
 																			 where files.user_id = ? and files.is_removed = 0 and files.parent = ? `, user.Id, path); err != nil {
 		logger.Error(err)
@@ -67,8 +77,12 @@ func (user *User) GetChildren(path string) (children []Metadata, err error) {
 	return children, nil
 
 }
+
+// Returns current file state for user, which means all not deleted files and directories currently existing for this user.
+// The returned value is a slice of maps, where map has path as key and Metadata as value.
+// Returns nil and error if error has occured.
 func (user *User) GetCurrentState() ([]map[string]interface{}, error) {
-	children, err := user.GetChildren("/")
+	children, err := user.GetChildren("/") //BUG GetChildren is not recursive, so GetCurrentState() does not return correct value.
 	if err != nil {
 		return nil, err
 	}
@@ -79,13 +93,26 @@ func (user *User) GetCurrentState() ([]map[string]interface{}, error) {
 	return resp, nil
 }
 
+//Returns list of changes made since given cursor. Returns empty map if no new changes were made.
+//Returns slice of maps, where map has path as key and Metadata as value if file exists, or nil as value if file has been removed since that cursor.
+//Returns current cursor if changes were made.
+//Returns nil, 0 and error if error has occured.
 func (user *User) GetChangesFromCursor(cursor int64) ([]map[string]interface{}, int64, error) {
 	var children []Metadata
+
+	counter, err := dbAccess.SelectInt("select count(id) from revisions where user_id = ?", user.Id)
+	if err != nil {
+		return nil, 0, err
+	}
+	if counter < 1 {
+		resp := make([]map[string]interface{}, 0) //TODO: Change resp to nil, check where it used
+		return resp, 0, nil
+	}
 	newCursor, err := dbAccess.SelectInt("select max(id) from revisions where user_id = ?", user.Id)
 	if err != nil {
 		return nil, 0, err
 	}
-	if _, err := dbAccess.Select(children, `select files.path Path, revisions.name Name, files.is_dir IsDir, revisions.size Size, revisions.id Rev, revisions.modified Modified, files.is_removed IsRemoved
+	if _, err := dbAccess.Select(&children, `select revisions.hash Hash, files.path Path, revisions.name Name, files.is_dir IsDir, revisions.size Size, revisions.id Rev, revisions.modified Modified, files.is_removed IsRemoved
 	                                     from files join revisions on files.current_revision_id = revisions.id 
 																			 where files.user_id = ? and revisions.id > ?`, user.Id, cursor); err != nil {
 		return nil, 0, err
@@ -101,6 +128,8 @@ func (user *User) GetChangesFromCursor(cursor int64) ([]map[string]interface{}, 
 	return resp, newCursor, nil
 }
 
+//If file exists, returns pointer to file struct for given path. If file does not exist, returns double nil.
+//Returns nil and error if error has occured.
 func (user *User) GetFileByPath(path string) (file *File, err error) {
 	file = new(File)
 	count, err := dbAccess.SelectInt("select count(*) from files where user_id = ? and path = ?", user.Id, path)
@@ -118,11 +147,16 @@ func (user *User) GetFileByPath(path string) (file *File, err error) {
 	return file, nil
 }
 
+//Creates new folder in given path. Uses CreateFile() for this task. If successful, returns pointer to file struct.
+//Returns nil and error if error has occured.
 func (user *User) CreateFolder(filepath string) (file *File, err error) {
 	logger.Debugf("Creating file entry for folder %s", filepath)
-	return user.CreateFile(filepath, true, false, "", 0)
+	return user.CreateFile(filepath, true, false, "", 0, "")
 }
-func (user *User) CreateFile(filepath string, isDir bool, overwrite bool, uuid string, size int64) (file *File, err error) {
+
+//Creates new file on given path, with specified parameters. All inserts and updates in database are made in single transaction,
+// so if error occurs no data is saved. Returns pointer to file struct if successful. Returns nil and error if error has occured.
+func (user *User) CreateFile(filepath string, isDir bool, overwrite bool, uuid string, size int64, hash string) (file *File, err error) {
 	dir := toolkit.Dir(toolkit.NormalizePath(filepath))
 	if dir != "." && dir != "/" {
 		file, err := user.GetFileByPath(dir)
@@ -179,6 +213,7 @@ func (user *User) CreateFile(filepath string, isDir bool, overwrite bool, uuid s
 	revision.FileId = file.Id
 	revision.Name = path.Base(filepath)
 	revision.UserId = user.Id
+	revision.Hash = hash
 	err = tx.Insert(revision)
 	if err != nil {
 		tx.Rollback()
@@ -190,10 +225,6 @@ func (user *User) CreateFile(filepath string, isDir bool, overwrite bool, uuid s
 		tx.Rollback()
 		return nil, err
 	}
-	// err = user.AddChange(tx, file)
-	// if err != nil {
-	// 	return nil, err
-	// }
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -201,6 +232,8 @@ func (user *User) CreateFile(filepath string, isDir bool, overwrite bool, uuid s
 
 }
 
+// Removes file at given filepath. Remove does not delete actual record in database, it only sets value of is_removed to true.
+// returns pointer to file struct if successful. Returns nil and error if error has occured.
 func (user *User) Remove(filepath string) (file *File, err error) {
 	file, err = user.GetFileByPath(filepath)
 	if err != nil {
@@ -221,40 +254,10 @@ func (user *User) Remove(filepath string) (file *File, err error) {
 
 }
 
-// func (user *User) AddChange(tx *gorp.Transaction, file *File) error {
-// 	var newCursor int64 = 0
-// 	count, err := tx.SelectInt("select count(*) from changes where user_id = ?", user.Id)
-// 	if err != nil {
-// 		tx.Rollback()
-// 		return err
-// 	}
-// 	if count > 0 {
-// 		newCursor, err = tx.SelectInt("select max(cursor_new) from changes where user_id = ?", user.Id)
-// 		if err != nil {
-// 			tx.Rollback()
-// 			return err
-// 		}
-// 	}
-// 	change := Change{FileId: file.Id, UserId: user.Id, CursorOld: newCursor, CursorNew: newCursor + 1}
-// 	err = tx.Insert(&change)
-// 	if err != nil {
-// 		tx.Rollback()
-// 		return err
-// 	}
-// 	return nil
-// }
-
-func (user *User) GetRevision(file *File, rev int64) (revision *Revision, err error) {
-	revision = new(Revision)
-	if err := dbAccess.SelectOne(revision, "select * from revisions where id=? and user_id = ? and file_id=?", rev, user.Id, file.Id); err != nil {
-		logger.Error(err)
-		return nil, err
-	}
-	return revision, nil
-}
-
-func (user *User) CreateRevision(filepath string, uuidVal string, size int64) (rev *Revision, err error) {
-	file, err := user.CreateFile(filepath, false, true, uuidVal, size)
+// Creates new revision for given path, with given parameters. Uses CreateFile() for that task.
+// If successful, returns pointer to Revision struct. Returns nil and error if error has occured.
+func (user *User) CreateRevision(filepath string, uuidVal string, size int64, hash string) (rev *Revision, err error) {
+	file, err := user.CreateFile(filepath, false, true, uuidVal, size, hash)
 	if err != nil {
 		return nil, err
 	}
