@@ -27,6 +27,21 @@ func (l *Listener) Listen(cursor string) {
 	l.cursor = cursor
 	go l.poll()
 }
+
+// sets current cursor and starts long polling for new changes.
+// When new changes arrive executes delta method. If no changes arrive in given time server timeouts
+// and poll executes itself again.
+func (l *Listener) Listen(cursor string) {
+	l.cursor = cursor
+	go l.poll()
+}
+
+func (l *Listener) ListenWS(cursor string) {
+	l.cursor = cursor
+	c.startWS()
+	go l.poll()
+}
+
 func (l *Listener) poll() {
 	for {
 		curCursor := l.cursor

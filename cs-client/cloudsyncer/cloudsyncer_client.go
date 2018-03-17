@@ -174,6 +174,7 @@ func Start() {
 		}
 	}
 	// _ := *flag.Bool("reset", false, "removes all data from files table, sets cursor to 0")
+	appConfig["websocket"] = *flag.Bool("ws", false, "Sets client transmition to WebSocket")
 	if toolkit.IsDirectory(getDbFilePath()) {
 		log.Println("Error - database path should be a file, is a directory")
 		warningClearDataFolder(getConfigFileDir())
@@ -234,7 +235,11 @@ func Start() {
 	if err != nil {
 		log.Fatal("failed to get cursor ", err)
 	}
-	listener.Listen(cursor)
+	if appConfig["websocket"] == true {
+		listener.ListenWS(cursor)
+	} else {
+		listener.Listen(cursor)
+	}
 	log.Printf("Cloudsyncer started.")
 	wg.Wait()
 	log.Printf("Quitting cloudsyncer... have a nice day!")
